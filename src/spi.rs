@@ -50,7 +50,7 @@ use crate::settings::{
 /// Helper to round up SPI transfer sizes to align with 4-byte read/writes.
 /// Only rounds up when needed (e.g., 1-4 rounds up to 4, 5-8 rounds up to 8).
 fn round_up_spi_transfer_size(data_length: usize) -> usize {
-    if data_length % 4 == 0 {
+    if data_length.is_multiple_of(4) {
         data_length
     } else {
         // Add the number of bytes needed to round up to the next multiple of 4
@@ -1314,7 +1314,7 @@ where
             .then_some(())
             .ok_or(Error::InvalidRamAddress(address))?;
 
-        if data.len() % 4 != 0 {
+        if !data.len().is_multiple_of(4) {
             return Err(Error::InvalidReadLength(data.len()));
         }
 
@@ -1338,7 +1338,7 @@ where
             .then_some(())
             .ok_or(Error::InvalidRamAddress(address))?;
 
-        if data.len() % 4 != 0 {
+        if !data.len().is_multiple_of(4) {
             return Err(Error::InvalidWriteLength(data.len()));
         }
 
