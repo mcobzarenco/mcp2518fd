@@ -131,9 +131,17 @@ where
         self.spi
     }
 
-    /// Performs a software reset of the MCP2518FD chip over SPI (this puts it
-    /// in configuration mode)
-    pub async fn reset(&mut self) -> Result<(), Error> {
+    /// Performs a software reset of the MCP2518FD chip over SPI, leaving it in Configuration
+    /// mode with the oscillator running.
+    ///
+    /// The RESET instruction is only defined for a device in Configuration mode (datasheet
+    /// section 4.1.1), so that mode is requested first. A failure to get there is ignored
+    /// because a reset is the recovery path for a wedged controller; the state is verified
+    /// after the reset instead. Times out after roughly 30 ms if the oscillator does not report
+    /// ready or the device is not in Configuration mode.
+    pub async fn reset(&mut self, delay: &mut impl DelayNs) -> Result<(), ConfigError> {
+        let _ = self.set_op_mode(OperationMode::Configuration, delay).await;
+
         let instruction = Instruction(OpCode::RESET);
 
         self.spi
@@ -141,7 +149,26 @@ where
             .await
             .map_err(|_| Error::SPIWrite)?;
 
-        Ok(())
+        const POLL_INTERVAL_US: u32 = 500;
+        const MAX_ATTEMPTS: usize = 60;
+
+        for attempt in 0..MAX_ATTEMPTS {
+            let osc = self.read_register::<OscillatorControlRegister>().await?;
+
+            if osc.oscrdy() {
+                let c1con = self.read_register::<CanControlRegister>().await?;
+
+                if c1con.opmode() == OperationMode::Configuration {
+                    return Ok(());
+                }
+            }
+
+            if attempt < MAX_ATTEMPTS - 1 {
+                delay.delay_us(POLL_INTERVAL_US).await;
+            }
+        }
+
+        Err(ConfigError::ConfigurationModeTimeout)
     }
 
     /// Does a full configuration sequence of the chip using the provided

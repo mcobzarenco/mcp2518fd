@@ -91,7 +91,7 @@ fn main() -> ! {
     {
         // Make sure the CAN controller gets reset (in case the Pico reboots
         // without the MCP2518FD losing power)
-        can.reset().unwrap();
+        can.reset(&mut delay).unwrap();
 
         // Configure the chip with some reasonable settings
         can.configure(
