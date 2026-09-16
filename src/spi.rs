@@ -287,8 +287,10 @@ where
                 ciint.set_eccie(true);
             }
 
-            // FIXME: expose a dedicated setting for this
-            if settings.time_base_counter.is_some() {
+            if settings
+                .time_base_counter
+                .is_some_and(|tbc| tbc.overflow_interrupt)
+            {
                 ciint.set_tbcie(true);
             }
 

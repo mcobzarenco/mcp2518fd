@@ -284,14 +284,28 @@ impl TxQueueConfiguration {
 pub struct TimeBaseCounterConfiguration {
     /// The TBC increments every `prescaler + 1` SYSCLK cycles (0..=1023).
     pub prescaler: u16,
+    /// Raise `CiINT.TBCIF` (and the interrupt pin, via `TBCIE`) when the 32-bit TBC overflows.
+    ///
+    /// The flag stays set until cleared with
+    /// [`crate::MCP2518FD::clear_register_flags`]; leave this off unless the overflow is
+    /// handled, or a level-triggered interrupt line stays asserted after the first overflow.
+    pub overflow_interrupt: bool,
 }
 
 impl TimeBaseCounterConfiguration {
     pub const MAX_PRESCALER: u16 = 1023;
 
-    /// Increments the TBC every `prescaler + 1` SYSCLK cycles.
+    /// Increments the TBC every `prescaler + 1` SYSCLK cycles, without the overflow interrupt.
     pub const fn new(prescaler: u16) -> Self {
-        Self { prescaler }
+        Self {
+            prescaler,
+            overflow_interrupt: false,
+        }
+    }
+
+    pub const fn with_overflow_interrupt(mut self, enabled: bool) -> Self {
+        self.overflow_interrupt = enabled;
+        self
     }
 
     /// Ticks the TBC at `tick_hz` given the SYSCLK frequency, e.g. `(40_000_000, 1_000_000)`
@@ -306,9 +320,7 @@ impl TimeBaseCounterConfiguration {
             return None;
         }
 
-        Some(Self {
-            prescaler: (divider - 1) as u16,
-        })
+        Some(Self::new((divider - 1) as u16))
     }
 }
 
