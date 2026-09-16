@@ -132,12 +132,22 @@ where
     /// Performs a software reset of the MCP2518FD chip over SPI, leaving it in Configuration
     /// mode with the oscillator running.
     ///
-    /// The RESET instruction is only defined for a device in Configuration mode (datasheet
-    /// section 4.1.1), so that mode is requested first. A failure to get there is ignored
-    /// because a reset is the recovery path for a wedged controller; the state is verified
-    /// after the reset instead. Times out after roughly 30 ms if the oscillator does not report
-    /// ready or the device is not in Configuration mode.
+    /// Neither the mode request nor the RESET instruction work while the device is in Sleep
+    /// mode, so the oscillator is first re-enabled by clearing OSC.OSCDIS (this also wakes a
+    /// device in Low Power Mode, and resets PLLEN/SCLKDIV to their defaults, which
+    /// [`MCP2518FD::configure_osc`] restores). The RESET instruction is only defined for a
+    /// device in Configuration mode (datasheet section 4.1.1), so that mode is requested next.
+    /// A failure to get there is ignored because a reset is the recovery path for a wedged
+    /// controller; the state is verified after the reset instead. Times out after roughly
+    /// 30 ms if the oscillator does not report ready or the device is not in Configuration
+    /// mode.
     pub async fn reset(&mut self, delay: &mut impl DelayNs) -> Result<(), ConfigError> {
+        // Power-on defaults: clock enabled, PLL off, SYSCLK undivided, CLKO divided by 10.
+        let mut osc = OscillatorControlRegister(0);
+        osc.set_oscdis(false);
+        osc.set_clkodiv(0b11);
+        self.write_register(osc).await?;
+
         let _ = self.set_op_mode(OperationMode::Configuration, delay).await;
 
         let instruction = Instruction(OpCode::RESET);
