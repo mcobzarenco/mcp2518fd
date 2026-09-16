@@ -103,9 +103,17 @@ impl From<Error> for ConfigError {
     }
 }
 
+/// Number of times a CRC-protected read is repeated on a CRC mismatch before giving up.
+const CRC_READ_RETRIES: usize = 3;
+
+/// The `N` field of the RAM CRC instructions counts 32-bit words in a single byte, which caps
+/// one CRC-protected RAM transfer at 255 words.
+const RAM_CRC_MAX_TRANSFER_BYTES: usize = 255 * 4;
+
 pub struct MCP2518FD<SPI> {
     spi: SPI,
     crc: crc::Crc<u16>,
+    crc_protection: bool,
 }
 
 #[cfg_attr(not(feature = "async"), maybe_async::maybe_async)]
@@ -121,7 +129,35 @@ where
             // requires some somewhat expensive initialization, so keep a
             // referenc to the Crc instance
             crc: crc::Crc::<u16>::new(&crc::CRC_16_CMS),
+            crc_protection: false,
         }
+    }
+
+    /// Enables or disables CRC-protected SPI transfers, see [`MCP2518FD::set_crc_protection`].
+    pub fn with_crc_protection(mut self, enabled: bool) -> Self {
+        self.crc_protection = enabled;
+        self
+    }
+
+    /// Enables or disables CRC-protected SPI transfers (datasheet section 4.3).
+    ///
+    /// When enabled, every access uses the CRC variant of the SPI instruction: reads use
+    /// `READ_CRC` and are retried up to three times on a mismatch, 32-bit register writes and
+    /// RAM writes use `WRITE_CRC`, and single-byte register writes use `WRITE_SAFE`, which the
+    /// device verifies before committing. A write CRC failure is not visible to the caller; the
+    /// device reports it through `CRC.CRCERRIF` (and `CiINT.SPICRCIF` if enabled).
+    ///
+    /// The Linux `mcp251xfd` driver enables the equivalent for all supported chips. It is
+    /// strongly recommended above a few MHz of SCK: errata for these devices describe RAM
+    /// corruption at high SCK with simultaneous bus activity. The cost is 3 extra bytes per
+    /// SFR access, 4 per RAM access, and the CRC computation.
+    pub fn set_crc_protection(&mut self, enabled: bool) {
+        self.crc_protection = enabled;
+    }
+
+    /// Whether CRC-protected SPI transfers are enabled.
+    pub fn crc_protection(&self) -> bool {
+        self.crc_protection
     }
 
     /// Releases ownership of the SPI resources
@@ -1281,33 +1317,24 @@ where
         self.write_sfr(&address, value.into()).await
     }
 
+    /// Reads a register with `READ_CRC` regardless of the CRC protection setting, retrying on
+    /// a CRC mismatch.
     pub async fn read_register_crc<R>(&mut self) -> Result<R, Error>
     where
         R: Register + From<u32>,
     {
         let address = R::get_address();
 
-        let mut attempts = 0;
-
-        loop {
-            if attempts == 3 {
-                return Err(Error::CrcMismatch);
-            }
-
-            match self.read_sfr_crc(&address).await.map(R::from) {
-                Ok(r) => return Ok(r),
-                Err(Error::CrcMismatch) => {
-                    attempts += 1;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
+        self.read_sfr_crc(&address).await.map(R::from)
     }
 
     /* Raw SFR Ops (Minimal type checking) */
 
     async fn read_sfr(&mut self, address: &SFRAddress) -> Result<u32, Error> {
+        if self.crc_protection {
+            return self.read_sfr_crc(address).await;
+        }
+
         let mut instruction = Instruction(OpCode::READ);
         instruction.set_address(*address as u16);
 
@@ -1325,15 +1352,23 @@ where
     }
 
     async fn write_sfr(&mut self, address: &SFRAddress, value: u32) -> Result<(), Error> {
+        // The instruction is big-endian on the wire, the register contents little-endian.
+        let bytes = value.to_le_bytes();
+
+        if self.crc_protection {
+            // For SFR accesses the N field counts bytes (section 4.3.3).
+            return self
+                .write_crc_transfer(*address as u16, bytes.len() as u8, &bytes)
+                .await;
+        }
+
         let mut instruction = Instruction(OpCode::WRITE);
         instruction.set_address(*address as u16);
 
         self.spi
             .transaction(&mut [
                 Operation::Write(&instruction.into_spi_data()),
-                // The "instruction" needs to be converted to BE bytes but the actual SFR register
-                // needs to be in LE format!!!
-                Operation::Write(&value.to_le_bytes()),
+                Operation::Write(&bytes),
             ])
             .await
             .map_err(|_| Error::SPIWrite)?;
@@ -1349,8 +1384,14 @@ where
         byte_offset: u8,
         value: u8,
     ) -> Result<(), Error> {
+        let byte_address = *address as u16 + byte_offset as u16;
+
+        if self.crc_protection {
+            return self.write_safe_transfer(byte_address, &[value]).await;
+        }
+
         let mut instruction = Instruction(OpCode::WRITE);
-        instruction.set_address(*address as u16 + byte_offset as u16);
+        instruction.set_address(byte_address);
 
         self.spi
             .transaction(&mut [
@@ -1364,33 +1405,133 @@ where
     }
 
     async fn read_sfr_crc(&mut self, address: &SFRAddress) -> Result<u32, Error> {
-        let mut instruction = Instruction(OpCode::READ_CRC);
-        instruction.set_address(*address as u16);
-        let instr = instruction.into_spi_data();
+        let mut buf = [0u8; 4];
 
-        let tx_buf = [
-            instr[0], instr[1], // command + address
-            4,        // num data bytes before CRC
-        ];
-        let mut rx_buf = [0u8; 6]; // 4 data + 2 crc
+        // For SFR accesses the N field counts bytes (section 4.3.2).
+        self.read_crc_retrying(*address as u16, buf.len() as u8, &mut buf)
+            .await?;
+
+        Ok(u32::from_le_bytes(buf))
+    }
+
+    /* CRC-protected SPI instructions (section 4.3) */
+
+    /// Issues `READ_CRC`, retrying on a CRC mismatch. `n_field` is the instruction's N byte:
+    /// bytes for SFR accesses, 32-bit words for RAM accesses.
+    async fn read_crc_retrying(
+        &mut self,
+        address: u16,
+        n_field: u8,
+        data: &mut [u8],
+    ) -> Result<(), Error> {
+        let mut attempt = 0;
+
+        loop {
+            match self.read_crc_transfer(address, n_field, data).await {
+                Err(Error::CrcMismatch) if attempt + 1 < CRC_READ_RETRIES => attempt += 1,
+                result => return result,
+            }
+        }
+    }
+
+    async fn read_crc_transfer(
+        &mut self,
+        address: u16,
+        n_field: u8,
+        data: &mut [u8],
+    ) -> Result<(), Error> {
+        let mut instruction = Instruction(OpCode::READ_CRC);
+        instruction.set_address(address);
+        let instruction = instruction.into_spi_data();
+
+        let header = [instruction[0], instruction[1], n_field];
+        let mut received_crc = [0u8; 2];
 
         self.spi
-            .transaction(&mut [Operation::Write(&tx_buf), Operation::Read(&mut rx_buf)])
+            .transaction(&mut [
+                Operation::Write(&header),
+                Operation::Read(data),
+                Operation::Read(&mut received_crc),
+            ])
             .await
             .map_err(|_| Error::SPIRead)?;
 
-        let rx_data = u32::from_le_bytes([rx_buf[0], rx_buf[1], rx_buf[2], rx_buf[3]]);
-        let rx_crc = u16::from_be_bytes([rx_buf[4], rx_buf[5]]);
+        let received_crc = u16::from_be_bytes(received_crc);
 
-        let mut digest = self.crc.digest();
-        digest.update(&tx_buf);
-        digest.update(&rx_buf[..4]);
-
-        if digest.finalize() != rx_crc {
-            return Err(Error::CrcMismatch);
+        if self.crc_of(&header, data) == received_crc {
+            return Ok(());
         }
 
-        Ok(rx_data)
+        // The Linux mcp251xfd driver observed that a READ_CRC of CiTBC whose lowest byte is
+        // 0x00 or 0x80 sometimes carries a CRC computed over that byte with bit 7 flipped, and
+        // that the flipped data is the correct value.
+        if address == SFRAddress::C1TBC as u16
+            && data.len() == 4
+            && (data[0] & 0xF8 == 0x00 || data[0] & 0xF8 == 0x80)
+        {
+            data[0] ^= 0x80;
+
+            if self.crc_of(&header, data) == received_crc {
+                return Ok(());
+            }
+        }
+
+        Err(Error::CrcMismatch)
+    }
+
+    /// Issues `WRITE_CRC`: the device writes the data, then checks the CRC and raises
+    /// `CRC.CRCERRIF` on a mismatch. `n_field` is the instruction's N byte: bytes for SFR
+    /// accesses, 32-bit words for RAM accesses.
+    async fn write_crc_transfer(
+        &mut self,
+        address: u16,
+        n_field: u8,
+        data: &[u8],
+    ) -> Result<(), Error> {
+        let mut instruction = Instruction(OpCode::WRITE_CRC);
+        instruction.set_address(address);
+        let instruction = instruction.into_spi_data();
+
+        let header = [instruction[0], instruction[1], n_field];
+        let crc = self.crc_of(&header, data).to_be_bytes();
+
+        self.spi
+            .transaction(&mut [
+                Operation::Write(&header),
+                Operation::Write(data),
+                Operation::Write(&crc),
+            ])
+            .await
+            .map_err(|_| Error::SPIWrite)
+    }
+
+    /// Issues `WRITE_SAFE`, which the device only commits if the CRC matches. Takes exactly
+    /// one byte for an SFR (section 4.3.4) or one 4-byte word for RAM (section 4.3.7).
+    async fn write_safe_transfer(&mut self, address: u16, data: &[u8]) -> Result<(), Error> {
+        debug_assert!(data.len() == 1 || data.len() == 4);
+
+        let mut instruction = Instruction(OpCode::WRITE_SAFE);
+        instruction.set_address(address);
+        let header = instruction.into_spi_data();
+
+        let crc = self.crc_of(&header, data).to_be_bytes();
+
+        self.spi
+            .transaction(&mut [
+                Operation::Write(&header),
+                Operation::Write(data),
+                Operation::Write(&crc),
+            ])
+            .await
+            .map_err(|_| Error::SPIWrite)
+    }
+
+    /// CRC-16/CMS over the instruction header and the data, as the device computes it.
+    fn crc_of(&self, header: &[u8], data: &[u8]) -> u16 {
+        let mut digest = self.crc.digest();
+        digest.update(header);
+        digest.update(data);
+        digest.finalize()
     }
 
     /* RAM related functions */
@@ -1452,6 +1593,19 @@ where
             return Err(Error::InvalidReadLength(data.len()));
         }
 
+        if self.crc_protection {
+            // For RAM accesses the N field counts 32-bit words (section 4.3.5), so long
+            // transfers are split.
+            let mut chunk_address = address;
+            for chunk in data.chunks_mut(RAM_CRC_MAX_TRANSFER_BYTES) {
+                self.read_crc_retrying(chunk_address, (chunk.len() / 4) as u8, chunk)
+                    .await?;
+                chunk_address += chunk.len() as u16;
+            }
+
+            return Ok(());
+        }
+
         let mut instruction = Instruction(OpCode::READ);
         instruction.set_address(address);
 
@@ -1474,6 +1628,19 @@ where
 
         if !data.len().is_multiple_of(4) {
             return Err(Error::InvalidWriteLength(data.len()));
+        }
+
+        if self.crc_protection {
+            // For RAM accesses the N field counts 32-bit words (section 4.3.6), so long
+            // transfers are split.
+            let mut chunk_address = address;
+            for chunk in data.chunks(RAM_CRC_MAX_TRANSFER_BYTES) {
+                self.write_crc_transfer(chunk_address, (chunk.len() / 4) as u8, chunk)
+                    .await?;
+                chunk_address += chunk.len() as u16;
+            }
+
+            return Ok(());
         }
 
         let mut instruction = Instruction(OpCode::WRITE);
@@ -1514,13 +1681,67 @@ impl OpCode {
     pub const READ: u16 = 0b0011 << 12;
     pub const WRITE: u16 = 0b0010 << 12;
     pub const READ_CRC: u16 = 0b1011 << 12;
-    #[allow(dead_code)]
     pub const WRITE_CRC: u16 = 0b1010 << 12;
+    pub const WRITE_SAFE: u16 = 0b1100 << 12;
 }
 
 #[cfg(test)]
 mod test {
-    use super::round_up_spi_transfer_size;
+    use super::{round_up_spi_transfer_size, Instruction, OpCode};
+
+    /// The device's CRC is CRC-16 with polynomial 0x8005, initial value 0xFFFF, no reflection
+    /// and no final XOR (section 4.3.1), which the catalogue calls CRC-16/CMS.
+    #[test]
+    fn crc_matches_device_algorithm() {
+        let crc = crc::Crc::<u16>::new(&crc::CRC_16_CMS);
+
+        // Bit-serial reference implementation of the datasheet's description.
+        fn reference(bytes: &[u8]) -> u16 {
+            let mut crc: u16 = 0xFFFF;
+            for &byte in bytes {
+                crc ^= (byte as u16) << 8;
+                for _ in 0..8 {
+                    crc = if crc & 0x8000 != 0 {
+                        (crc << 1) ^ 0x8005
+                    } else {
+                        crc << 1
+                    };
+                }
+            }
+            crc
+        }
+
+        let mut instruction = Instruction(OpCode::READ_CRC);
+        instruction.set_address(0x400);
+        let instruction = instruction.into_spi_data();
+        let frame = [
+            instruction[0],
+            instruction[1],
+            2,
+            0xDE,
+            0xAD,
+            0xBE,
+            0xEF,
+            1,
+            2,
+            3,
+            4,
+        ];
+
+        assert_eq!(crc.checksum(&frame), reference(&frame));
+        assert_eq!(crc.checksum(b"123456789"), 0xAEE7);
+    }
+
+    #[test]
+    fn instruction_encoding() {
+        let mut instruction = Instruction(OpCode::WRITE_SAFE);
+        instruction.set_address(0xE05);
+        assert_eq!(instruction.into_spi_data(), [0xCE, 0x05]);
+
+        let mut instruction = Instruction(OpCode::READ_CRC);
+        instruction.set_address(0x400);
+        assert_eq!(instruction.into_spi_data(), [0xB4, 0x00]);
+    }
 
     #[test]
     fn test_round_up_spi_transfer_size() {

@@ -10,6 +10,15 @@ All features are disabled by default.
 
 - `defmt` - Implements `defmt::Format` for most public types so they can be printed using `defmt::info!()` and relatives
 
+## CRC-Protected SPI Transfers
+
+The device offers CRC variants of every SPI instruction (`READ_CRC`, `WRITE_CRC`, `WRITE_SAFE`).
+Enable them with `MCP2518FD::new(spi).with_crc_protection(true)`: reads are then verified and
+retried on a mismatch, and writes are checked by the device. This is strongly recommended when
+running SCK above a few MHz, since the device errata describe RAM corruption under simultaneous
+SPI and CAN activity at high SCK, and it is what the Linux `mcp251xfd` driver does for all
+supported chips. Note that SCK must in any case stay at or below 0.85 × SYSCLK / 2.
+
 ## Examples
 
 Examples for the Raspberry Pi Pico (`rp2040` microcontroller) are available in the `examples/`
