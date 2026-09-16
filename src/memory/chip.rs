@@ -1,5 +1,6 @@
 use bitfield::bitfield;
 
+use crate::memory::ClearableFlags;
 use crate::{impl_register, impl_to_from_u32};
 
 bitfield! {
@@ -73,6 +74,11 @@ impl CrcRegister {
 impl_to_from_u32!(CrcRegister);
 impl_register!(CrcRegister, CRC);
 
+impl ClearableFlags for CrcRegister {
+    // FERRIF, CRCERRIF (DS20006027B Register 3-3)
+    const CLEARABLE_FLAGS: u32 = 0x3 << 16;
+}
+
 bitfield! {
     pub struct EccControlRegister(u32);
     impl Debug;
@@ -115,6 +121,11 @@ impl EccStatusRegister {
 
 impl_to_from_u32!(EccStatusRegister);
 impl_register!(EccStatusRegister, ECCSTAT);
+
+impl ClearableFlags for EccStatusRegister {
+    // DEDIF, SECIF (DS20006027B Register 3-5)
+    const CLEARABLE_FLAGS: u32 = 0x3 << 1;
+}
 
 bitfield! {
     pub struct DeviceIdRegister(u32);

@@ -1,5 +1,6 @@
 use bitfield::{bitfield, Bit};
 
+use crate::memory::ClearableFlags;
 use crate::{impl_register, impl_to_from_u32, software_clearable};
 
 use super::{fifo::FifoNumber, filter::FilterNumber};
@@ -161,6 +162,11 @@ impl InterruptRegister {
     software_clearable!(cerrif, clear_cerrif);
     software_clearable!(wakif, clear_wakif);
     software_clearable!(ivmif, clear_ivmif);
+}
+
+impl ClearableFlags for InterruptRegister {
+    // IVMIF, WAKIF, CERRIF, SERRIF, MODIF, TBCIF (DS20006027B Register 3-14)
+    const CLEARABLE_FLAGS: u32 = 0xF000 | 0x000C;
 }
 
 impl_to_from_u32!(InterruptRegister);

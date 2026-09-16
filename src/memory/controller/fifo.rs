@@ -1,7 +1,7 @@
 use bitfield::bitfield;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::memory::{RepeatedRegister, SFRAddress, RAM_BASE_ADDRESS};
+use crate::memory::{ClearableFlags, RepeatedRegister, SFRAddress, RAM_BASE_ADDRESS};
 use crate::{impl_register, impl_to_from_u32, software_clearable, software_settable};
 
 pub const HIGHEST_FIFO_PRIORITY: u8 = 0b0001_1111;
@@ -160,6 +160,11 @@ impl TxEventFifoStatusRegister {
     software_clearable!(tefovif, clear_tefovif);
 }
 
+impl ClearableFlags for TxEventFifoStatusRegister {
+    // TEFOVIF (DS20006027B Register 3-24)
+    const CLEARABLE_FLAGS: u32 = 1 << 3;
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum RetransmissionAttempts {
@@ -276,6 +281,11 @@ impl TxQueueStatusRegister {
     software_clearable!(txerr, clear_txerr);
     software_clearable!(txlarb, clear_txlarb);
     software_clearable!(txabt, clear_txabt);
+}
+
+impl ClearableFlags for TxQueueStatusRegister {
+    // TXABT, TXLARB, TXERR, TXATIF (DS20006027B Register 3-27)
+    const CLEARABLE_FLAGS: u32 = 0xF0;
 }
 
 bitfield! {
@@ -399,6 +409,11 @@ impl FifoStatusRegister {
     software_clearable!(txerr, clear_txerr);
     software_clearable!(txlarb, clear_txlarb);
     software_clearable!(txabt, clear_txabt);
+}
+
+impl ClearableFlags for FifoStatusRegister {
+    // TXABT, TXLARB, TXERR, TXATIF, RXOVIF (DS20006027B Register 3-30)
+    const CLEARABLE_FLAGS: u32 = 0xF8;
 }
 
 impl RepeatedRegister for FifoStatusRegister {

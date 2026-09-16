@@ -34,7 +34,7 @@ use crate::memory::controller::interrupt::{
     InterruptCodeRegister, InterruptRegister, RxInterruptStatusRegister,
     RxOverflowInterruptStatusRegister, TxAttemptInterruptStatusRegister, TxInterruptStatusRegister,
 };
-use crate::memory::{is_valid_ram_address, Register, RepeatedRegister, SFRAddress};
+use crate::memory::{is_valid_ram_address, ClearableFlags, Register, RepeatedRegister, SFRAddress};
 use crate::message::rx::{RxHeader, RxMessage};
 use crate::message::tx::{TxEventObject, TxHeader, TxMessage};
 use crate::message::{len_for_dlc, MAX_FD_BUFFER_SIZE};
@@ -839,16 +839,13 @@ where
         &mut self,
         fifo_number: FifoNumber,
     ) -> Result<bool, Error> {
-        let mut exhausted = false;
+        let status = self
+            .clear_repeated_register_flags(fifo_number, |status: &mut FifoStatusRegister| {
+                status.clear_txatif()
+            })
+            .await?;
 
-        self.modify_repeated_register(fifo_number, |mut cififostam: FifoStatusRegister| {
-            exhausted = cififostam.txatif();
-            cififostam.clear_txatif();
-            cififostam
-        })
-        .await?;
-
-        Ok(exhausted)
+        Ok(status.txatif())
     }
 
     /// Checks to see if there are any messages in the TEF
@@ -1104,6 +1101,54 @@ where
 
     /* Generic register ops with mapping */
 
+    /// Clears hardware-set flags in a repeated register without the read-modify-write race.
+    ///
+    /// See [`MCP2518FD::clear_register_flags`].
+    pub async fn clear_repeated_register_flags<R, F>(
+        &mut self,
+        index: R::Index,
+        clear: F,
+    ) -> Result<R, Error>
+    where
+        R: RepeatedRegister + ClearableFlags + From<u32> + Into<u32>,
+        F: FnOnce(&mut R),
+    {
+        let address = R::get_address_for(index);
+        let raw = self.read_sfr(&address).await?;
+
+        let mut register = R::from(raw | R::CLEARABLE_FLAGS);
+        clear(&mut register);
+        self.write_sfr(&address, register.into()).await?;
+
+        Ok(R::from(raw))
+    }
+
+    /// Clears hardware-set flags in a register without the read-modify-write race.
+    ///
+    /// `HS/C` flags are cleared by writing 0 and unaffected by writing 1. The register is read,
+    /// every clearable flag is set to 1 in the copy, `clear` resets the ones to clear, and the
+    /// result is written back. Flags set by hardware between the read and the write therefore
+    /// survive, unlike with [`MCP2518FD::modify_register`]. Returns the register as it was read,
+    /// so the caller can inspect which flags were pending.
+    pub async fn clear_register_flags<R, F>(&mut self, clear: F) -> Result<R, Error>
+    where
+        R: Register + ClearableFlags + From<u32> + Into<u32>,
+        F: FnOnce(&mut R),
+    {
+        let address = R::get_address();
+        let raw = self.read_sfr(&address).await?;
+
+        let mut register = R::from(raw | R::CLEARABLE_FLAGS);
+        clear(&mut register);
+        self.write_sfr(&address, register.into()).await?;
+
+        Ok(R::from(raw))
+    }
+
+    /// Reads a repeated register, applies `transform` and writes the result back.
+    ///
+    /// Do not use this to clear hardware-set flags: any flag set between the read and the write
+    /// is written back as 0 and lost. Use [`MCP2518FD::clear_repeated_register_flags`] instead.
     pub async fn modify_repeated_register<R, F>(
         &mut self,
         index: R::Index,
@@ -1141,6 +1186,10 @@ where
         self.write_sfr(&address, value.into()).await
     }
 
+    /// Reads a register, applies `transform` and writes the result back.
+    ///
+    /// Do not use this to clear hardware-set flags: any flag set between the read and the write
+    /// is written back as 0 and lost. Use [`MCP2518FD::clear_register_flags`] instead.
     pub async fn modify_register<R, F>(&mut self, transform: F) -> Result<(), Error>
     where
         R: Register + From<u32> + Into<u32>,

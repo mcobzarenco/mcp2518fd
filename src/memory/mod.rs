@@ -40,6 +40,16 @@ pub trait RepeatedRegister {
     fn get_address_for(index: Self::Index) -> SFRAddress;
 }
 
+/// Registers containing flags that are set by hardware and cleared by software (`HS/C`).
+///
+/// Such flags are cleared by writing 0 and unaffected by writing 1. Clearing them through a
+/// plain read-modify-write races with hardware: a flag set between the read and the write is
+/// written back as 0 and lost. See [`crate::MCP2518FD::clear_register_flags`].
+pub trait ClearableFlags {
+    /// Mask of every `HS/C` flag bit in the register.
+    const CLEARABLE_FLAGS: u32;
+}
+
 #[derive(Copy, Clone)]
 pub enum SFRAddress {
     /* Chip Specific Registers */
