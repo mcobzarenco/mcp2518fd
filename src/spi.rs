@@ -637,6 +637,33 @@ where
 
     /* Transmit and Receive Functions */
 
+    /// Writes byte 1 of a FIFO/TXQ/TEF control register, which holds only UINC (bit 8), TXREQ
+    /// (bit 9) and FRESET (bit 10).
+    ///
+    /// A single-byte write avoids re-writing the configuration bits in the other bytes and
+    /// halves the SPI traffic of a read-modify-write. Callers must pass the current TXREQ state
+    /// (or `true` to request transmission): writing TXREQ as 0 while it is set requests an
+    /// abort of the pending transmission (Registers 3-26 and 3-29).
+    async fn write_fifo_control_byte(
+        &mut self,
+        address: &SFRAddress,
+        increment: bool,
+        request_transmission: bool,
+    ) -> Result<(), Error> {
+        const UINC: u8 = 1 << 0;
+        const TXREQ: u8 = 1 << 1;
+
+        let mut value = 0;
+        if increment {
+            value |= UINC;
+        }
+        if request_transmission {
+            value |= TXREQ;
+        }
+
+        self.write_sfr_byte(address, 1, value).await
+    }
+
     /// Pushes a new message into the TXQ without setting the TXREQ bit to
     /// request transmission.
     ///
@@ -644,13 +671,21 @@ where
     /// transmitting all at once. To push a single message and immediately
     /// request transmission, use [`MCP2518FD::tx_queue_transmit_message`].
     pub async fn tx_queue_push_message(&mut self, message: &TxMessage) -> Result<(), Error> {
+        self.tx_queue_push_message_inner(message, false).await
+    }
+
+    async fn tx_queue_push_message_inner(
+        &mut self,
+        message: &TxMessage,
+        request_transmission: bool,
+    ) -> Result<(), Error> {
         /* Make sure TXQ is enabled */
 
         if !self.read_register::<CanControlRegister>().await?.txqen() {
             return Err(Error::TxQueueDisabled);
         }
 
-        let mut control_register = self.read_register::<TxQueueControlRegister>().await?;
+        let control_register = self.read_register::<TxQueueControlRegister>().await?;
 
         /* Make sure FIFO is big enough */
 
@@ -680,13 +715,14 @@ where
 
         self.write_ram(ram_address as u16, data).await?;
 
-        /* Increment tail pointer but do NOT request transmission */
+        /* Increment the head, keeping any pending TXREQ */
 
-        control_register.set_uinc();
-
-        self.write_register(control_register).await?;
-
-        Ok(())
+        self.write_fifo_control_byte(
+            &SFRAddress::C1TXQCON,
+            true,
+            request_transmission || control_register.txreq(),
+        )
+        .await
     }
 
     /// Pushes to the TXQ without reading any status registers or performing
@@ -711,15 +747,12 @@ where
 
         self.write_ram(ram_address as u16, data).await?;
 
-        /* Increment tail pointer but do NOT request transmission */
+        /* Increment the head, keeping any pending TXREQ */
 
-        self.modify_register(|mut txqcon: TxQueueControlRegister| {
-            txqcon.set_uinc();
-            txqcon
-        })
-        .await?;
+        let control_register = self.read_register::<TxQueueControlRegister>().await?;
 
-        Ok(())
+        self.write_fifo_control_byte(&SFRAddress::C1TXQCON, true, control_register.txreq())
+            .await
     }
 
     /// Requests transmission of all messages in the TXQ by setting the TXREQ
@@ -730,13 +763,8 @@ where
     /// message and immediately request transmission, prefer
     /// [`MCP2518FD::tx_queue_transmit_message`].
     pub async fn tx_queue_request_transmission(&mut self) -> Result<(), Error> {
-        self.modify_register(|mut txqcon: TxQueueControlRegister| {
-            txqcon.set_txreq(true);
-            txqcon
-        })
-        .await?;
-
-        Ok(())
+        self.write_fifo_control_byte(&SFRAddress::C1TXQCON, false, true)
+            .await
     }
 
     /// Pushes a message into the TXQ and immediately requests transmission by
@@ -746,10 +774,7 @@ where
     /// [`MCP2518FD::tx_queue_push_message`] and
     /// [`MCP2518FD::tx_queue_request_transmission`].
     pub async fn tx_queue_transmit_message(&mut self, message: &TxMessage) -> Result<(), Error> {
-        self.tx_queue_push_message(message).await?;
-        self.tx_queue_request_transmission().await?;
-
-        Ok(())
+        self.tx_queue_push_message_inner(message, true).await
     }
 
     /// Fetches the status of the TXQ to determine whether it is empty
@@ -777,7 +802,17 @@ where
         fifo_number: FifoNumber,
         message: &TxMessage,
     ) -> Result<(), Error> {
-        let mut control_register = self
+        self.tx_fifo_push_message_inner(fifo_number, message, false)
+            .await
+    }
+
+    async fn tx_fifo_push_message_inner(
+        &mut self,
+        fifo_number: FifoNumber,
+        message: &TxMessage,
+        request_transmission: bool,
+    ) -> Result<(), Error> {
+        let control_register = self
             .read_repeated_register::<FifoControlRegister>(fifo_number)
             .await?;
 
@@ -817,14 +852,14 @@ where
 
         self.write_ram(ram_address as u16, data).await?;
 
-        /* Increment tail pointer but to NOT request transmission */
+        /* Increment the head, keeping any pending TXREQ */
 
-        control_register.set_uinc();
-
-        self.write_repeated_register(fifo_number, control_register)
-            .await?;
-
-        Ok(())
+        self.write_fifo_control_byte(
+            &FifoControlRegister::get_address_for(fifo_number),
+            true,
+            request_transmission || control_register.txreq(),
+        )
+        .await
     }
 
     /// Requests transmission of all messages in the given TX FIFO by setting
@@ -838,13 +873,12 @@ where
         &mut self,
         fifo_number: FifoNumber,
     ) -> Result<(), Error> {
-        self.modify_repeated_register(fifo_number, |mut fifocon: FifoControlRegister| {
-            fifocon.set_txreq(true);
-            fifocon
-        })
-        .await?;
-
-        Ok(())
+        self.write_fifo_control_byte(
+            &FifoControlRegister::get_address_for(fifo_number),
+            false,
+            true,
+        )
+        .await
     }
 
     /// Pushes a message into the given TX FIFO and immediately requests
@@ -858,10 +892,8 @@ where
         fifo_number: FifoNumber,
         message: &TxMessage,
     ) -> Result<(), Error> {
-        self.tx_fifo_push_message(fifo_number, message).await?;
-        self.tx_fifo_request_transmission(fifo_number).await?;
-
-        Ok(())
+        self.tx_fifo_push_message_inner(fifo_number, message, true)
+            .await
     }
 
     /// Fetches the status of the TX FIFO to determine whether it is empty
