@@ -8,7 +8,9 @@ bitfield! {
     u8;
     pub pllen, set_pllen: 0;
     pub oscdis, set_oscdis: 2;
-    pub slckdiv, set_slckdiv: 4;
+    /// Low Power Mode enable: selects LPM instead of Sleep when Sleep mode is requested.
+    pub lpmen, set_lpmen: 3;
+    pub sclkdiv, set_sclkdiv: 4;
     pub clkodiv, set_clkodiv: 6, 5;
     pub pllrdy, _: 8;
     pub oscrdy, _: 10;

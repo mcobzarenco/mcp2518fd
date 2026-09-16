@@ -272,7 +272,7 @@ where
             });
 
             // Whether or not to divide the system clock by 2
-            osc.set_slckdiv(match oscillator_settings.divider {
+            osc.set_sclkdiv(match oscillator_settings.divider {
                 SysClkDivider::DivByOne => false,
                 SysClkDivider::DivByTwo => true,
             });
