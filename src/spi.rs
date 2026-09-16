@@ -228,7 +228,10 @@ where
         Ok(c1con.opmode())
     }
 
-    /// Changes the operating mode of the chip. Will time out after 5 attempts.
+    /// Changes the operating mode of the chip.
+    ///
+    /// Leaving Normal mode waits for the bus to become idle, which can take a full frame
+    /// (about 75 ms for a CAN FD frame at 10 kbit/s), so this polls for up to 100 ms.
     pub async fn set_op_mode(
         &mut self,
         op_mode: OperationMode,
@@ -240,23 +243,22 @@ where
         })
         .await?;
 
-        /* Delay 2ms checking every 500us for op mode change */
+        const POLL_INTERVAL_US: u32 = 200;
+        const MAX_ATTEMPTS: usize = 500;
 
-        const MAX_ATTEMPTS: usize = 5;
-
-        for i in 0..MAX_ATTEMPTS {
+        for attempt in 0..MAX_ATTEMPTS {
             let c1con = self.read_register::<CanControlRegister>().await?;
 
             if c1con.opmode() == op_mode {
-                break;
-            } else if i == MAX_ATTEMPTS - 1 {
-                return Err(ConfigError::ChangeOpModeTimeout);
+                return Ok(());
             }
 
-            delay.delay_us(500u32).await;
+            if attempt < MAX_ATTEMPTS - 1 {
+                delay.delay_us(POLL_INTERVAL_US).await;
+            }
         }
 
-        Ok(())
+        Err(ConfigError::ChangeOpModeTimeout)
     }
 
     pub async fn configure_osc(
@@ -285,20 +287,23 @@ where
         .await?;
 
         if let settings::Pll::On = oscillator_settings.pll {
-            const MAX_ATTEMPTS: usize = 3;
+            const POLL_INTERVAL_US: u32 = 500;
+            const MAX_ATTEMPTS: usize = 60;
 
-            // Wait for PLL ready
-            for i in 0..MAX_ATTEMPTS {
+            // Wait up to 30 ms for the PLL to lock
+            for attempt in 0..MAX_ATTEMPTS {
                 let osc = self.read_register::<OscillatorControlRegister>().await?;
 
                 if osc.pllrdy() {
-                    break;
-                } else if i == MAX_ATTEMPTS - 1 {
-                    return Err(ConfigError::PLLNotReady);
+                    return Ok(());
                 }
 
-                delay.delay_us(500u32).await;
+                if attempt < MAX_ATTEMPTS - 1 {
+                    delay.delay_us(POLL_INTERVAL_US).await;
+                }
             }
+
+            return Err(ConfigError::PLLNotReady);
         }
 
         Ok(())
