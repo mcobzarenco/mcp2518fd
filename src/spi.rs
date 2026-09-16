@@ -305,14 +305,30 @@ where
     }
 
     pub async fn configure_io(&mut self, io_config: IoConfiguration) -> Result<(), ConfigError> {
-        self.modify_register(|mut iocon: IoControlRegister| {
-            iocon.set_xstbyen(io_config.enable_tx_standby_pin);
-            iocon.set_txcanod(io_config.tx_can_open_drain);
-            iocon.set_sof(io_config.start_of_frame_on_clko);
-            iocon.set_intod(io_config.interrupt_pin_open_drain);
-            iocon
-        })
-        .await?;
+        let mut iocon = self.read_register::<IoControlRegister>().await?;
+
+        iocon.set_xstbyen(io_config.enable_tx_standby_pin);
+        iocon.set_txcanod(io_config.tx_can_open_drain);
+        iocon.set_sof(io_config.start_of_frame_on_clko);
+        iocon.set_intod(io_config.interrupt_pin_open_drain);
+
+        self.write_io_control(iocon).await?;
+
+        Ok(())
+    }
+
+    /// Writes IOCON one byte at a time, skipping the GPIO pin status byte.
+    ///
+    /// The datasheet requires single-byte writes for IOCON (Table 3-1, Note 2). Per errata
+    /// DS80000789E item 5, a write that covers byte 2 (bits 23:16, the read-only GPIO pin
+    /// status) clears LAT0/LAT1, so that byte is never written.
+    pub async fn write_io_control(&mut self, iocon: IoControlRegister) -> Result<(), Error> {
+        let bytes = u32::from(iocon).to_le_bytes();
+
+        for byte_offset in [0u8, 1, 3] {
+            self.write_sfr_byte(&SFRAddress::IOCON, byte_offset, bytes[byte_offset as usize])
+                .await?;
+        }
 
         Ok(())
     }
@@ -1273,7 +1289,29 @@ where
                 Operation::Write(&value.to_le_bytes()),
             ])
             .await
-            .map_err(|_| Error::SPIRead)?;
+            .map_err(|_| Error::SPIWrite)?;
+
+        Ok(())
+    }
+
+    /// Writes a single byte of an SFR; `byte_offset` 0 is bits 7:0 (SFR access is
+    /// byte-oriented, see datasheet section 4.1).
+    async fn write_sfr_byte(
+        &mut self,
+        address: &SFRAddress,
+        byte_offset: u8,
+        value: u8,
+    ) -> Result<(), Error> {
+        let mut instruction = Instruction(OpCode::WRITE);
+        instruction.set_address(*address as u16 + byte_offset as u16);
+
+        self.spi
+            .transaction(&mut [
+                Operation::Write(&instruction.into_spi_data()),
+                Operation::Write(&[value]),
+            ])
+            .await
+            .map_err(|_| Error::SPIWrite)?;
 
         Ok(())
     }
