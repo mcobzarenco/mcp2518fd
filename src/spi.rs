@@ -36,6 +36,7 @@ use crate::memory::{is_valid_ram_address, ClearableFlags, Register, RepeatedRegi
 use crate::message::rx::{RxHeader, RxMessage};
 use crate::message::tx::{TxEventObject, TxHeader, TxMessage};
 use crate::message::{len_for_dlc, MAX_FD_BUFFER_SIZE};
+use crate::rx_fifo::RxFifoReader;
 use crate::settings::{
     self, BitTimeConfiguration, FilterConfiguration, FilterMatchMode, RxFifoConfiguration,
     TxFifoConfiguration,
@@ -81,6 +82,10 @@ pub enum Error {
     FifoNotRx,
     /// The CRC from the chip did not match our calculated value for the data we received
     CrcMismatch,
+    /// Tried to create a bulk reader for a FIFO that still holds messages
+    FifoNotEmpty,
+    /// The buffer passed to a bulk read cannot hold even one message object
+    BufferTooSmall,
     Other,
 }
 
@@ -1157,6 +1162,120 @@ where
         .await?;
 
         Ok(Some(msg))
+    }
+
+    /// Creates a bulk reader for a receive FIFO, see [`RxFifoReader`].
+    ///
+    /// The FIFO must be empty (typically right after configuration): the reader derives the
+    /// FIFO's RAM base address from the current user address and head index, which only
+    /// coincide with the tail while nothing is pending. Fails with [`Error::FifoNotEmpty`]
+    /// otherwise.
+    pub async fn rx_fifo_reader(&mut self, fifo_number: FifoNumber) -> Result<RxFifoReader, Error> {
+        let control_register = self
+            .read_repeated_register::<FifoControlRegister>(fifo_number)
+            .await?;
+
+        if control_register.txen() {
+            return Err(Error::FifoNotRx);
+        }
+
+        let status_register = self
+            .read_repeated_register::<FifoStatusRegister>(fifo_number)
+            .await?;
+
+        if status_register.tfnrfnif() {
+            return Err(Error::FifoNotEmpty);
+        }
+
+        // Empty FIFO: the user address points at the object the head index also refers to.
+        let head = status_register.fifoci();
+        let user_address = self
+            .read_repeated_register::<UserAddressRegister>(UserAddressKind::Fifo(fifo_number))
+            .await?
+            .calculate_ram_address() as u16;
+
+        let with_timestamp = control_register.rxtsen();
+        let payload_size = control_register.payload_size().num_bytes();
+        let object_size = (8 + if with_timestamp { 4 } else { 0 } + payload_size) as u16;
+        let base_address = user_address - head as u16 * object_size;
+
+        Ok(RxFifoReader::new(
+            fifo_number,
+            base_address,
+            control_register.fifo_size(),
+            payload_size,
+            with_timestamp,
+            head,
+        ))
+    }
+
+    /// Reads all pending message objects of the reader's FIFO into `buf` and pops them.
+    ///
+    /// Costs one status register read, one RAM read per contiguous run of objects (at most two,
+    /// when the ring wraps) and one single-byte UINC write per object, instead of five SPI
+    /// transactions per message with [`MCP2518FD::rx_fifo_get_next`]. Reads at most as many
+    /// objects as `buf` holds ([`RxFifoReader::capacity`]); call again for the rest.
+    ///
+    /// Returns the number of objects read; parse them with [`RxFifoReader::message`]. When the
+    /// FIFO has timestamps, objects older than the previous message are treated as stale
+    /// (erratum DS80000789E item 6, corrupted FIFOCI) and neither returned nor popped.
+    pub async fn rx_fifo_fetch(
+        &mut self,
+        reader: &mut RxFifoReader,
+        buf: &mut [u8],
+    ) -> Result<usize, Error> {
+        let object_size = reader.object_size();
+        let capacity = reader.capacity(buf.len());
+
+        if capacity == 0 {
+            return Err(Error::BufferTooSmall);
+        }
+
+        let status_register = self
+            .read_repeated_register::<FifoStatusRegister>(reader.fifo())
+            .await?;
+
+        if !status_register.tfnrfnif() {
+            return Ok(0);
+        }
+
+        let pending = reader.pending(status_register.fifoci(), status_register.tferffif());
+        let mut read = 0usize;
+
+        // Up to two contiguous runs: tail..end of ring, then start of ring..head.
+        for _ in 0..2 {
+            let remaining = (pending as usize).saturating_sub(read);
+            let count = reader
+                .contiguous(remaining as u8)
+                .min((capacity - read) as u8) as usize;
+
+            if count == 0 {
+                break;
+            }
+
+            let chunk = &mut buf[read * object_size..(read + count) * object_size];
+            self.read_ram(reader.address_of(reader.tail()), chunk)
+                .await?;
+
+            let fresh = reader.accept_fresh(chunk, count);
+
+            for _ in 0..fresh {
+                self.write_fifo_control_byte(
+                    &FifoControlRegister::get_address_for(reader.fifo()),
+                    true,
+                    false,
+                )
+                .await?;
+            }
+            reader.advance(fresh as u8);
+            read += fresh;
+
+            if fresh < count {
+                break;
+            }
+        }
+
+        Ok(read)
     }
 
     /* Interrupt related operations */

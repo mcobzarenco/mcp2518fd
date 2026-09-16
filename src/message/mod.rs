@@ -2,7 +2,7 @@ pub mod rx;
 pub mod tx;
 
 /// The length in DWORDs of the TX and RX header objects
-const HEADER_SIZE_DWORDS: usize = 2;
+pub(crate) const HEADER_SIZE_DWORDS: usize = 2;
 
 /// The maximum data buffer (paylod) size in bytes
 pub const MAX_FD_BUFFER_SIZE: usize = 64;

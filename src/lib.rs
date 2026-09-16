@@ -5,6 +5,7 @@ pub(crate) use macros::*;
 
 pub mod memory;
 pub mod message;
+pub mod rx_fifo;
 pub mod settings;
 pub mod spi;
 
