@@ -13,8 +13,6 @@ use embedded_hal::spi::SpiDevice;
 use embedded_hal_async::delay::DelayNs;
 #[cfg(feature = "async")]
 use embedded_hal_async::spi::SpiDevice;
-#[cfg(feature = "async")]
-use futures::future::OptionFuture;
 
 use crate::memory::chip::{IoControlRegister, OscillatorControlRegister};
 use crate::memory::controller::configuration::{
@@ -954,37 +952,24 @@ where
             .await?
             .calculate_ram_address();
 
-        /* Check if timestamps are enabled and read accordingly */
+        /* Read the header and, if enabled, the timestamp in one transfer */
 
         let control_register = self.read_register::<TxEventFifoControlRegister>().await?;
+        let with_timestamp = control_register.teftsen();
 
-        let obj = if control_register.teftsen() {
-            let mut buf = [0u8; 12];
+        let mut buf = [0u8; 12];
+        let read_len = if with_timestamp { 12 } else { 8 };
 
-            self.read_ram(ram_address as u16, &mut buf).await?;
+        self.read_ram(ram_address as u16, &mut buf[..read_len])
+            .await?;
 
-            TxEventObject {
-                header: TxHeader([
-                    u32::from_le_bytes(buf[0..4].try_into().unwrap()),
-                    u32::from_le_bytes(buf[4..8].try_into().unwrap()),
-                ]),
-                timestamp: Some(u32::from_le_bytes(buf[8..12].try_into().unwrap())),
-            }
-        } else {
-            let mut buf = [0u8; 8];
-
-            self.read_ram(ram_address as u16, &mut buf).await?;
-
-            TxEventObject {
-                header: TxHeader([
-                    u32::from_le_bytes(buf[0..4].try_into().unwrap()),
-                    u32::from_le_bytes(buf[4..8].try_into().unwrap()),
-                ]),
-                timestamp: None,
-            }
-        };
-
-        Ok(Some(obj))
+        Ok(Some(TxEventObject {
+            header: TxHeader([
+                u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+                u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+            ]),
+            timestamp: with_timestamp.then(|| u32::from_le_bytes(buf[8..12].try_into().unwrap())),
+        }))
     }
 
     /// If there is a message available in the TEF it will be read and the FIFO
@@ -1000,11 +985,8 @@ where
             return Ok(None);
         };
 
-        self.modify_register(|mut tefcon: TxEventFifoControlRegister| {
-            tefcon.set_uinc();
-            tefcon
-        })
-        .await?;
+        self.write_fifo_control_byte(&SFRAddress::C1TEFCON, true, false)
+            .await?;
 
         Ok(Some(obj))
     }
@@ -1039,9 +1021,21 @@ where
         &mut self,
         fifo_number: FifoNumber,
     ) -> Result<Option<RxMessage>, Error> {
-        /* Make sure there is data to read */
+        /* Make sure it's a receive FIFO with data to read */
 
-        if !self.rx_fifo_has_next(fifo_number).await? {
+        let control_register = self
+            .read_repeated_register::<FifoControlRegister>(fifo_number)
+            .await?;
+
+        if control_register.txen() {
+            return Err(Error::FifoNotRx);
+        }
+
+        let status_register = self
+            .read_repeated_register::<FifoStatusRegister>(fifo_number)
+            .await?;
+
+        if !status_register.tfnrfnif() {
             return Ok(None);
         }
 
@@ -1052,63 +1046,35 @@ where
             .await?
             .calculate_ram_address();
 
-        /* Read the message header to see how much data we need to read */
+        /* Read the whole message object (header, optional timestamp, payload) in one transfer.
+         * The payload area is PLSIZE bytes regardless of the DLC. */
 
-        let mut buf = [0u8; 8];
+        const HEADER_LEN: usize = 8;
+        const TIMESTAMP_LEN: usize = 4;
 
-        self.read_ram(ram_address as u16, &mut buf).await?;
+        let with_timestamp = control_register.rxtsen();
+        let payload_len = control_register.payload_size().num_bytes();
+        let data_offset = HEADER_LEN + if with_timestamp { TIMESTAMP_LEN } else { 0 };
+
+        let mut buf = [0u8; HEADER_LEN + TIMESTAMP_LEN + MAX_FD_BUFFER_SIZE];
+
+        self.read_ram(ram_address as u16, &mut buf[..data_offset + payload_len])
+            .await?;
 
         let header = RxHeader([
             u32::from_le_bytes(buf[0..4].try_into().unwrap()),
             u32::from_le_bytes(buf[4..8].try_into().unwrap()),
         ]);
 
-        /* Read timestamp (if applicable) */
+        let timestamp = with_timestamp.then(|| u32::from_le_bytes(buf[8..12].try_into().unwrap()));
 
-        let control_register = self
-            .read_repeated_register::<FifoControlRegister>(fifo_number)
-            .await?;
-
-        #[cfg(not(feature = "async"))]
-        let timestamp = control_register
-            .rxtsen()
-            .then(|| {
-                let mut ts = [0u8; 4];
-                self.read_ram((ram_address + 4 * 2) as u16, &mut ts)?;
-
-                Ok(u32::from_le_bytes(ts[..].try_into().unwrap()))
-            })
-            .transpose()?;
-
-        #[cfg(feature = "async")]
-        let timestamp = OptionFuture::from(control_register.rxtsen().then_some(async {
-            let mut ts = [0u8; 4];
-            self.read_ram((ram_address + 4 * 2) as u16, &mut ts).await?;
-
-            Ok(u32::from_le_bytes(ts[..].try_into().unwrap()))
-        }))
-        .await
-        .transpose()?;
-
-        /* Read the content of the message */
-
-        let mut data = [0u8; MAX_FD_BUFFER_SIZE];
-        let data_len = len_for_dlc(header.dlc(), header.fdf()).unwrap();
-        let data_offset = if timestamp.is_some() { 3 } else { 2 };
-
-        // The reading length has to be a multiple of 4 thus we round up the data_len
-        let read_len = round_up_spi_transfer_size(data_len);
-
-        self.read_ram(
-            (ram_address + 4 * data_offset) as u16,
-            &mut data[..read_len],
-        )
-        .await?;
-
-        /* Assemble RxMessage */
+        // A DLC larger than the FIFO's payload size (DLCMM) leaves the excess bytes unavailable.
+        let data_len = len_for_dlc(header.dlc(), header.fdf())
+            .unwrap_or(0)
+            .min(payload_len);
 
         Ok(Some(
-            RxMessage::new(header, timestamp, &data[..data_len]).unwrap(),
+            RxMessage::new(header, timestamp, &buf[data_offset..data_offset + data_len]).unwrap(),
         ))
     }
 
@@ -1129,10 +1095,12 @@ where
             return Ok(None);
         };
 
-        self.modify_repeated_register(fifo_number, |mut tefcon: FifoControlRegister| {
-            tefcon.set_uinc();
-            tefcon
-        })
+        // TXREQ has no effect on a receive FIFO, so it is safe to write as 0 here.
+        self.write_fifo_control_byte(
+            &FifoControlRegister::get_address_for(fifo_number),
+            true,
+            false,
+        )
         .await?;
 
         Ok(Some(msg))
