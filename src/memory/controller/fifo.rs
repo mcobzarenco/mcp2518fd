@@ -196,7 +196,7 @@ impl PayloadSize {
             Self::Bytes24 => 24,
             Self::Bytes32 => 32,
             Self::Bytes48 => 48,
-            Self::Bytes64 => 65,
+            Self::Bytes64 => 64,
         }
     }
 }
@@ -446,6 +446,21 @@ impl RepeatedRegister for FifoStatusRegister {
             FifoNumber::Fifo29 => SFRAddress::C1FIFOSTA29,
             FifoNumber::Fifo30 => SFRAddress::C1FIFOSTA30,
             FifoNumber::Fifo31 => SFRAddress::C1FIFOSTA31,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_size_num_bytes_matches_plsize_table() {
+        // DS20006027B Register 3-29, PLSIZE[2:0].
+        let expected = [8, 12, 16, 20, 24, 32, 48, 64];
+        for (code, bytes) in expected.into_iter().enumerate() {
+            let size = PayloadSize::try_from(code as u8).unwrap();
+            assert_eq!(size.num_bytes(), bytes, "PLSIZE {code}");
         }
     }
 }
