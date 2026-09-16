@@ -178,7 +178,8 @@ bitfield! {
     impl Debug;
     u8;
     pub tdcv, set_tdcv: 5, 0;
-    pub tdco, set_tdco: 13, 8;
+    /// Two's complement, -64..=63 SYSCLK cycles.
+    pub tdco, set_tdco: 14, 8;
     _tdcmod, _set_tdcmod: 17, 16;
     pub sid11en, set_sid11en: 24;
     pub edgflten, set_edgflten: 25;
@@ -224,3 +225,21 @@ bitfield! {
 
 impl_to_from_u32!(TimeStampControlRegister);
 impl_register!(TimeStampControlRegister, C1TSCON);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tdco_is_seven_bits() {
+        // DS20006027B Register 3-10: TDCO[6:0] at bits 14:8.
+        let mut tdc = TransmitterDelayCompensationRegister(0);
+        tdc.set_tdco(0x7F);
+        assert_eq!(tdc.0, 0x7F << 8);
+        assert_eq!(tdc.tdco(), 0x7F);
+
+        tdc.set_tdco(63);
+        assert_eq!(tdc.tdco(), 63);
+        assert_eq!(tdc.tdcv(), 0);
+    }
+}
