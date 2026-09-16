@@ -1380,7 +1380,8 @@ impl OpCode {
     pub const READ: u16 = 0b0011 << 12;
     pub const WRITE: u16 = 0b0010 << 12;
     pub const READ_CRC: u16 = 0b1011 << 12;
-    pub const WRITE_CRC: u16 = 01010 << 12;
+    #[allow(dead_code)]
+    pub const WRITE_CRC: u16 = 0b1010 << 12;
 }
 
 #[cfg(test)]
