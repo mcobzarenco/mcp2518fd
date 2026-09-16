@@ -134,12 +134,9 @@ impl TxEventFifoControlRegister {
         self._fsize() + 1
     }
 
-    /// Max size is 32.
+    /// Sets the number of message objects; `size` is clamped to 1..=32.
     pub fn set_fifo_size(&mut self, size: u8) {
-        self._set_fsize(match size.cmp(&32u8) {
-            core::cmp::Ordering::Greater => 31,
-            _ => size - 1,
-        });
+        self._set_fsize(size.clamp(1, 32) - 1);
     }
 }
 
@@ -238,12 +235,9 @@ impl TxQueueControlRegister {
         self._fsize() + 1
     }
 
-    /// Max size is 32.
+    /// Sets the number of message objects; `size` is clamped to 1..=32.
     pub fn set_fifo_size(&mut self, size: u8) {
-        self._set_fsize(match size.cmp(&32u8) {
-            core::cmp::Ordering::Greater => 31,
-            _ => size - 1,
-        });
+        self._set_fsize(size.clamp(1, 32) - 1);
     }
 
     pub fn payload_size(&self) -> PayloadSize {
@@ -326,12 +320,9 @@ impl FifoControlRegister {
         self._fsize() + 1
     }
 
-    /// Max size is 32.
+    /// Sets the number of message objects; `size` is clamped to 1..=32.
     pub fn set_fifo_size(&mut self, size: u8) {
-        self._set_fsize(match size.cmp(&32u8) {
-            core::cmp::Ordering::Greater => 31,
-            _ => size - 1,
-        });
+        self._set_fsize(size.clamp(1, 32) - 1);
     }
 
     pub fn payload_size(&self) -> PayloadSize {
@@ -462,5 +453,16 @@ mod tests {
             let size = PayloadSize::try_from(code as u8).unwrap();
             assert_eq!(size.num_bytes(), bytes, "PLSIZE {code}");
         }
+    }
+
+    #[test]
+    fn fifo_size_is_clamped() {
+        let mut con = FifoControlRegister(0);
+        con.set_fifo_size(0);
+        assert_eq!(con.fifo_size(), 1);
+        con.set_fifo_size(16);
+        assert_eq!(con.fifo_size(), 16);
+        con.set_fifo_size(200);
+        assert_eq!(con.fifo_size(), 32);
     }
 }
