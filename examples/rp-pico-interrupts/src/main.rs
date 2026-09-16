@@ -18,7 +18,8 @@ use mcp2518fd::{
     settings::{
         BitTimeConfiguration, DataBitTimeConfiguration, FifoConfiguration, FifoMode,
         FilterConfiguration, FilterMatchMode, IoConfiguration, NominalBitTimeConfiguration,
-        OscillatorConfiguration, RxFifoConfiguration, Settings, TxQueueConfiguration,
+        OscillatorConfiguration, RxFifoConfiguration, Settings, TimeBaseCounterConfiguration,
+        TxQueueConfiguration,
     },
     spi::MCP2518FD,
 };
@@ -136,7 +137,7 @@ fn main() -> ! {
                 )),
                 // Enable the Time Based Counter (required for timestamps to be
                 // recorded as non-zero)
-                enable_time_based_counter: true,
+                time_base_counter: Some(TimeBaseCounterConfiguration::new(0)),
                 // Do not filter by any data bits
                 data_bits_to_match: None,
                 // Do not interrupt on CAN bus errors

@@ -196,8 +196,13 @@ where
         self.configure_tx_event_fifo(settings.tx_event_fifo).await?;
         self.configure_tx_queue(settings.tx_queue).await?;
 
-        if settings.enable_time_based_counter {
+        if let Some(time_base_counter) = settings.time_base_counter {
             self.modify_register(|mut tscon: TimeStampControlRegister| {
+                tscon.set_tbcpre(
+                    time_base_counter
+                        .prescaler
+                        .min(settings::TimeBaseCounterConfiguration::MAX_PRESCALER),
+                );
                 tscon.set_tbcen(true);
                 tscon
             })
@@ -237,7 +242,7 @@ where
             }
 
             // FIXME: expose a dedicated setting for this
-            if settings.enable_time_based_counter {
+            if settings.time_base_counter.is_some() {
                 ciint.set_tbcie(true);
             }
 

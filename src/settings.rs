@@ -279,6 +279,39 @@ impl TxQueueConfiguration {
     }
 }
 
+/// Time Base Counter (TBC) configuration; the TBC provides RX and TEF timestamps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeBaseCounterConfiguration {
+    /// The TBC increments every `prescaler + 1` SYSCLK cycles (0..=1023).
+    pub prescaler: u16,
+}
+
+impl TimeBaseCounterConfiguration {
+    pub const MAX_PRESCALER: u16 = 1023;
+
+    /// Increments the TBC every `prescaler + 1` SYSCLK cycles.
+    pub const fn new(prescaler: u16) -> Self {
+        Self { prescaler }
+    }
+
+    /// Ticks the TBC at `tick_hz` given the SYSCLK frequency, e.g. `(40_000_000, 1_000_000)`
+    /// for microsecond timestamps. Returns `None` if the ratio is not an integer in 1..=1024.
+    pub const fn with_tick_rate(sysclk_hz: u32, tick_hz: u32) -> Option<Self> {
+        if tick_hz == 0 || !sysclk_hz.is_multiple_of(tick_hz) {
+            return None;
+        }
+
+        let divider = sysclk_hz / tick_hz;
+        if divider == 0 || divider > Self::MAX_PRESCALER as u32 + 1 {
+            return None;
+        }
+
+        Some(Self {
+            prescaler: (divider - 1) as u16,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct Settings {
     pub oscillator: OscillatorConfiguration,
@@ -286,7 +319,8 @@ pub struct Settings {
     pub bit_time_configuration: BitTimeConfiguration,
     pub tx_event_fifo: Option<TxEventFifoConfiguration>,
     pub tx_queue: Option<TxQueueConfiguration>,
-    pub enable_time_based_counter: bool,
+    /// Enables the Time Base Counter with the given prescaler.
+    pub time_base_counter: Option<TimeBaseCounterConfiguration>,
     pub data_bits_to_match: Option<DataBits>,
     pub enable_can_error_interrupts: bool,
     pub enable_spi_error_interrupt: bool,
@@ -436,4 +470,33 @@ pub enum FilterMatchMode {
     StandardOnly,
     ExtendedOnly,
     Both,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_base_counter_tick_rate() {
+        assert_eq!(
+            TimeBaseCounterConfiguration::with_tick_rate(40_000_000, 1_000_000),
+            Some(TimeBaseCounterConfiguration::new(39))
+        );
+        assert_eq!(
+            TimeBaseCounterConfiguration::with_tick_rate(40_000_000, 40_000_000),
+            Some(TimeBaseCounterConfiguration::new(0))
+        );
+        assert_eq!(
+            TimeBaseCounterConfiguration::with_tick_rate(40_000_000, 39_062),
+            None
+        );
+        assert_eq!(
+            TimeBaseCounterConfiguration::with_tick_rate(40_000_000, 10_000),
+            None
+        );
+        assert_eq!(
+            TimeBaseCounterConfiguration::with_tick_rate(40_000_000, 0),
+            None
+        );
+    }
 }
