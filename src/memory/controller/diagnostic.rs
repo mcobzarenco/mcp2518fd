@@ -6,8 +6,8 @@ bitfield! {
     pub struct TransmitReceiveErrorCountRegister(u32);
     impl Debug;
     u8;
-    pub tec, _: 7, 0;
-    pub rec, _: 15, 8;
+    pub rec, _: 7, 0;
+    pub tec, _: 15, 8;
     pub ewarn, _: 16;
     pub rxwarn, _: 17;
     pub txwarn, _: 18;
@@ -55,3 +55,18 @@ bitfield! {
 
 impl_to_from_u32!(BusDiagnosticRegister1);
 impl_register!(BusDiagnosticRegister1, C1BDIAG1);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trec_counters_and_flags() {
+        // DS20006027B Register 3-20: REC[7:0] at bits 7:0, TEC[7:0] at bits 15:8.
+        let trec = TransmitReceiveErrorCountRegister(0x0020_AB12);
+        assert_eq!(trec.rec(), 0x12);
+        assert_eq!(trec.tec(), 0xAB);
+        assert!(trec.txbo());
+        assert!(!trec.txbp());
+    }
+}
