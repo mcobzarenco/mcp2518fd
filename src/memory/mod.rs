@@ -10,7 +10,22 @@ pub const RAM_END_ADDRESS: u32 = 0xBFF;
 
 /// Calculates whether a RAM address range is valid without making any IO calls
 pub fn is_valid_ram_address(address: u32, data_size: usize) -> bool {
-    address >= RAM_BASE_ADDRESS && (address + data_size as u32) <= RAM_END_ADDRESS
+    address >= RAM_BASE_ADDRESS && (address + data_size as u32) <= RAM_END_ADDRESS + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ram_bounds_are_inclusive_of_last_word() {
+        assert!(is_valid_ram_address(RAM_BASE_ADDRESS, 4));
+        assert!(is_valid_ram_address(RAM_END_ADDRESS - 3, 4));
+        assert!(is_valid_ram_address(RAM_BASE_ADDRESS, 2048));
+        assert!(!is_valid_ram_address(RAM_END_ADDRESS - 3, 8));
+        assert!(!is_valid_ram_address(RAM_BASE_ADDRESS - 4, 4));
+        assert!(!is_valid_ram_address(RAM_END_ADDRESS + 1, 4));
+    }
 }
 
 /// Represents an SFR register that has a single unique memory location
